@@ -1,39 +1,49 @@
 # Renderer hook for ETS2 experiments
 
-A Windows x64 DLL that is injected into `eurotrucks2.exe` by a small companion injector. The DLL contains a signature scanner, an inline hook engine and a 60 Hz profiler that writes to the debug output. The profiler currently reports simulated numbers; no engine offsets are shipped, because they change with every game build.
+A Windows x64 DLL that can be injected into `eurotrucks2.exe` or loaded through the game's SCS plugin path. It resolves its own signature, hooks the DirectX presentation path with MinHook and draws a Dear ImGui telemetry window over the frame.
 
-Build with MSVC from the repository root:
+## Build
+
+With MSVC:
 
 ```powershell
 cmake -S . -B build -A x64
 cmake --build build --config Release
 ```
 
-Or with an x64 MinGW-w64 toolchain, which links the C and C++ runtimes statically so the DLL has no extra runtime DLL dependencies:
+With an x64 MinGW-w64 toolchain, which links the runtimes statically:
 
 ```powershell
 cmake -S . -B build-mingw -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release
 cmake --build build-mingw
 ```
 
-The MinGW build puts the executable and DLL directly in `build-mingw` rather than a `Release` subdirectory. Start the game, then inject with:
+The MinGW build writes the executable and DLL directly into `build-mingw`. The DLL depends only on Windows components: `kernel32`, `user32`, `shell32`, `d3d11` and the universal CRT, which ships with Windows 10 and later. `d3dcompiler_47.dll`, used by the ImGui Direct3D 11 backend, is loaded at runtime by `src/d3dcompiler_shim.cpp` because MinGW has no import library for it.
+
+## Injection
 
 ```powershell
 .\build\Release\Injector.exe eurotrucks2.exe "C:\path\to\build\Release\renderer_hook.dll"
 ```
 
-The injector finds the first process with that name, opens it with full access, writes the DLL path and calls `LoadLibraryW` through a remote thread. It converts its narrow arguments with the active ANSI code page, so characters outside that code page are lost. A zero remote thread exit code is ambiguous because only 32 bits are reported; check the debug output if in doubt.
+The injector finds the first process with that name, writes the DLL path and calls `LoadLibraryW` through a remote thread. Its narrow arguments are converted with the active ANSI code page, so characters outside that code page are lost. A zero remote thread exit code is ambiguous because only 32 bits are reported.
 
-## Components
+## Architecture
 
-`src/scanner.*` walks the executable sections of the main module and matches byte patterns such as `"E8 ? ? ? ? 48 8B D8"`. Sections are mapped with `VirtualQuery`, non-readable, guarded or non-image pages are skipped, and windows are copied with `ReadProcessMemory` before matching, so an unreadable page can never fault the process. Matching uses a Boyer-Moore-Horspool skip table anchored on the last fixed byte. Patterns and their tokens are validated; a malformed pattern returns `nullptr` instead of searching.
+`src/core.*` is the single entry point. It pins the DLL, verifies that the host is `eurotrucks2.exe`, runs the signature scan, installs the presentation hooks and starts the profiler. It runs once, whether the DLL arrives through injection or through the plugin export.
 
-`src/hook.*` installs a 14-byte absolute jump (`FF 25 00 00 00 00` plus the destination address). The stolen prologue is copied into a trampoline page allocated within 2 GB of the target, relative branches and RIP-relative operands are relocated, and the trampoline returns to the first untouched instruction. Only a subset of prologues is decoded on purpose: `call`/`jmp`/`jcc rel32`, RIP-relative and standard `modrm` forms of a few common opcodes, pushes and `mov`/`moffs` immediates. Anything else makes `install` fail rather than producing a half-understood copy. Installation rejects pages that are not committed, executable and readable, verifies that the prologue still matches, switches it to `PAGE_EXECUTE_READWRITE`, patches, flushes the instruction cache and restores the previous protection. Ensure no thread can execute the target, the detour or the trampoline while a hook is installed or removed; this engine does not suspend threads.
+`src/dx_hook.*` resolves `IDXGISwapChain::Present` (vtable slot 8) and `IDXGISwapChain1::Present1` (slot 22) from a throwaway D3D11 swap chain on a hidden window, then hands both addresses to MinHook, which owns the trampolines. The detours sample `QueryPerformanceCounter`, log a warning through `OutputDebugStringW` when a frame exceeds 33.3 ms, draw the overlay and call the trampoline. `Present1` is skipped with a log line if the platform does not expose it.
 
-`src/dx_hook.*` resolves `IDXGISwapChain::Present` (vtable index 8) without hardcoded offsets. It creates a hidden popup window and a throwaway D3D11 swap chain, first on the hardware driver and then on WARP, reads the method pointer straight from the swap chain vtable - which is the same DXGI entry that DirectX 12 titles and their wrappers use - and releases every dummy object. The address is then patched by the trampoline engine. Because the render thread is already running, the install suspends the process's other threads, checks that no instruction pointer lies inside the prologue span, patches, and resumes them; if any thread cannot be inspected or sits inside that span, the hook is skipped and the game keeps rendering. `hkPresent` samples `QueryPerformanceCounter`, counts presents atomically, smooths the frame rate, draws the overlay and then writes a one-line warning through `OutputDebugStringW` when a frame exceeds 33.3 ms, using stack buffers only. Draw calls and wait states are still simulated; the panel shows the smoothed FPS and the current frame time from the real timer.
+`src/overlay.*` drives Dear ImGui with its Direct3D 11 backend. On the first frame it queries the device and immediate context from the intercepted swap chain, creates the ImGui context without a platform backend (no input, no cursor change, no ini file) and lets the backend build its shaders and font texture. Each frame it binds a render target view for the buffer that `IDXGISwapChain3::GetCurrentBackBufferIndex` reports, sets a full-frame viewport, renders the telemetry window and restores the previous targets and viewport. The drawing itself is the backend's own shader pipeline, which saves and restores the device context state it touches.
 
-`src/overlay.*` draws the diagnostic panel as a normal D3D11 draw so it lands in the same command stream as the rest of the frame. A 5x7 bitmap alphabet is compiled into the module and rasterised into a static 396x64 BGRA buffer with an opaque panel background and bright green glyphs, so the result never depends on the undefined contents of a rotated flip-model buffer, then uploaded to a dynamic texture and sampled by a two-vertex-attribute shader pair. The shaders are compiled once at first use through `d3dcompiler_47.dll` loaded dynamically, so no import library or extra runtime file is required beyond what Windows ships; if that DLL or the shader compilation is unavailable, the overlay disables itself and says why in the debug output. Each frame resolves the presented buffer through `IDXGISwapChain3::GetCurrentBackBufferIndex` and falls back to index 0 on older chains, fetches exactly that buffer, takes the frame size from the texture itself rather than the swap chain description, creates a render target view for the current format (nothing is cached, so `ResizeBuffers` is never blocked), binds a full-frame viewport with `TopLeftX/Y` at zero because the quad is already in clip space, clears the scissor list, drops any predicate the engine left bound, discards the view contents where `ID3D11DeviceContext1` is available, draws a four-vertex triangle strip and flushes the context so the draw is queued before the original `Present` runs with a dedicated alpha blend, depth-disabled and scissor-disabled state, and then restores the input layout, topology, vertex buffer, vertex and pixel shaders, geometry shader, stream-out targets, rasterizer, blend, depth-stencil, all render targets, viewport, scissor rect and the pixel shader resource and sampler that it touched.
+`src/profiler.*` keeps the 60 Hz waitable-timer thread that reports present counts once per second.
 
-`src/renderer_hook.*` pins the DLL, checks that the host process is `eurotrucks2.exe`, runs the example scan, installs the Present hook and starts a waitable-timer loop at 60 Hz with a fixed stack buffer for output, so reporting does not allocate. Move the scan results into real engine markers before trusting the numbers.
+`src/scanner.*` walks the executable sections of the main module and matches masked byte patterns. Sections are mapped with `VirtualQuery`, unreadable or guarded pages are skipped and candidates are copied with `ReadProcessMemory`, so scanning cannot fault the process. The pattern shipped in `core.cpp` is a placeholder that is only matched, never called.
 
-The example signature in `renderer_hook.cpp` is intentionally unverified and is only compared, never called. A third-party overlay that installs its own Present hook before this DLL loads will be bypassed by the trampoline, and an overlay that hooks afterwards may stack on top of this one; both are fine for measurement but worth remembering when the numbers look odd. Actual offsets and detour logic belong to the build you are targeting. Keep the DLL loaded while a hook or worker is active, and only use any of this with software and processes you are allowed to modify.
+`src/plugin.cpp` exports `scs_telemetry_init` and `scs_telemetry_shutdown` for the SCS telemetry API version 1, so the same DLL can be dropped into `bin/win_x64/plugins/` and started by the game instead of being injected. It validates the version, logs through the API's own callback, starts the core and returns success; channel registration is not implemented yet.
+
+`third_party/` contains MinHook 1.3.4 and Dear ImGui 1.91.5, both unchanged and compiled into the DLL. Versions and licences are listed in `third_party/README.md`.
+
+## Limits
+
+The overlay is display-only and uses the default ImGui font, so it needs no external files. Direct3D 12 swap chains have no immediate context for the backend and disable the overlay with a debug message. Nothing here is tied to a specific game build beyond the placeholder signature; real engine markers and any detour logic belong to the build you target. Only use this with software and processes you are allowed to modify.

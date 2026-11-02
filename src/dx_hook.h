@@ -2,8 +2,8 @@
 
 namespace dx_hook {
 
-// Resolves IDXGISwapChain::Present through a temporary device and detours it.
-// Returns false when DXGI is unavailable; the caller then continues unhooked.
+// Resolves IDXGISwapChain::Present and Present1 from a throwaway swap chain and hooks
+// both through MinHook. Returns false when DXGI cannot be initialized.
 bool install() noexcept;
 unsigned long long frame_count() noexcept;
 

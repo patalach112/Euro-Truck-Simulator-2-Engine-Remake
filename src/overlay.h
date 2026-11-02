@@ -2,12 +2,21 @@
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
-#include <dxgi.h>
+#include <d3d11.h>
 
 namespace overlay {
 
-// Draws the diagnostic panel onto the swap chain back buffer. Returns false when
-// the swap chain is not backed by an ID3D11Device or the panel does not fit.
-bool render(IDXGISwapChain* swap_chain, double fps, double frame_ms) noexcept;
+struct stats {
+    double fps;
+    double frame_ms;
+    unsigned long long presents;
+    unsigned back_buffer;
+    unsigned buffer_count;
+    const char* present_mode;
+};
+
+// Draws the telemetry window onto the given render target. Render thread only.
+bool render(ID3D11Device* device, ID3D11DeviceContext* context, ID3D11RenderTargetView* target,
+            unsigned width, unsigned height, const stats& values) noexcept;
 
 }  // namespace overlay

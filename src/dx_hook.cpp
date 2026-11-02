@@ -1,80 +1,48 @@
 #include "dx_hook.h"
-#include "hook.h"
 #include "overlay.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
-#include <tlhelp32.h>
 #include <d3d11.h>
-#include <dxgi.h>
+#include <dxgi1_4.h>
+#include <MinHook.h>
 
 #include <atomic>
 #include <cstdint>
 #include <cwchar>
-#include <vector>
+#include <initializer_list>
 
 namespace dx_hook {
 namespace {
 
 using PresentFn = HRESULT(WINAPI*)(IDXGISwapChain*, UINT, UINT);
+using Present1Fn = HRESULT(WINAPI*)(IDXGISwapChain1*, UINT, UINT, const DXGI_PRESENT_PARAMETERS*);
 
 constexpr std::size_t present_index = 8;
+constexpr std::size_t present1_index = 22;
 constexpr std::uint64_t spike_threshold_ns = 33300000;
 constexpr wchar_t dummy_class[] = L"renderer_hook_dummy_window";
+constexpr GUID iid_id3d11_device = {0xdb6f6ddb, 0xac77, 0x4e88,
+    {0x82, 0x53, 0x81, 0x9d, 0xf9, 0xbb, 0xf1, 0x40}};
+constexpr GUID iid_id3d11_texture2d = {0x6f15aaf2, 0xd208, 0x4e89,
+    {0x9a, 0xb4, 0x48, 0x95, 0x35, 0xd3, 0x4f, 0x9c}};
 
-hook::InlineHook g_hook;
-std::atomic<PresentFn> g_original{nullptr};
+PresentFn g_present = nullptr;
+Present1Fn g_present1 = nullptr;
 std::atomic<unsigned long long> g_frames{0};
 LARGE_INTEGER g_frequency{};
-bool g_mode_reported = false;
+bool g_reported = false;
 
-const wchar_t* swap_effect_name(DXGI_SWAP_EFFECT effect) noexcept {
-    switch (effect) {
-    case DXGI_SWAP_EFFECT_DISCARD: return L"discard";
-    case DXGI_SWAP_EFFECT_SEQUENTIAL: return L"sequential";
-    case DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL: return L"flip sequential";
-    case DXGI_SWAP_EFFECT_FLIP_DISCARD: return L"flip discard";
-    default: return L"unknown";
-    }
-}
-
-void report_presentation(IDXGISwapChain* swap_chain) noexcept {
-    if (g_mode_reported) return;
-    using get_desc_fn = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain*, DXGI_SWAP_CHAIN_DESC*);
-    auto** table = *reinterpret_cast<void***>(swap_chain);
-    const auto get_desc = table ? reinterpret_cast<get_desc_fn>(table[12]) : nullptr;
-    if (!get_desc) return;
-    DXGI_SWAP_CHAIN_DESC description{};
-    if (FAILED(get_desc(swap_chain, &description))) return;
-    g_mode_reported = true;
-    wchar_t message[160];
-    const int written = std::swprintf(message, sizeof(message) / sizeof(message[0]),
-        L"renderer_hook: presentation mode %ls, %u buffers.\n",
-        swap_effect_name(description.SwapEffect), description.BufferCount);
-    if (written > 0) OutputDebugStringW(message);
-}
+ID3D11Device* g_device = nullptr;
+ID3D11DeviceContext* g_context = nullptr;
+IDXGISwapChain3* g_chain3 = nullptr;
+IDXGISwapChain* g_chain3_owner = nullptr;
 
 thread_local struct {
     LARGE_INTEGER tick{};
     double fps = 0.0;
     double frame_ms = 0.0;
 } t_frame;
-
-using ReleaseFn = ULONG(STDMETHODCALLTYPE*)(IUnknown*);
-
-// COM layout is read through the vtable directly, because MinGW headers expose
-// either C-style lpVtbl tables or C++ virtual interfaces depending on the toolchain.
-template <typename T>
-void* method(T* object, std::size_t index) noexcept {
-    auto** table = *reinterpret_cast<void***>(object);
-    return table ? table[index] : nullptr;
-}
-
-template <typename T>
-void release(T* object) noexcept {
-    const auto fn = reinterpret_cast<ReleaseFn>(method(object, 2));
-    if (fn) fn(reinterpret_cast<IUnknown*>(object));
-}
 
 LRESULT CALLBACK dummy_window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
     return DefWindowProcW(window, message, wparam, lparam);
@@ -93,7 +61,32 @@ HWND create_dummy_window() noexcept {
     return window;
 }
 
-PresentFn present_from(DXGI_SWAP_CHAIN_DESC& description, HWND window) noexcept {
+void* method_address(void* object, std::size_t index) noexcept {
+    auto** table = *reinterpret_cast<void***>(object);
+    return table ? table[index] : nullptr;
+}
+
+const char* swap_effect_name(DXGI_SWAP_EFFECT effect) noexcept {
+    switch (effect) {
+    case DXGI_SWAP_EFFECT_DISCARD: return "discard";
+    case DXGI_SWAP_EFFECT_SEQUENTIAL: return "sequential";
+    case DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL: return "flip sequential";
+    case DXGI_SWAP_EFFECT_FLIP_DISCARD: return "flip discard";
+    default: return "unknown";
+    }
+}
+
+struct swap_chain_targets {
+    void* present = nullptr;
+    void* present1 = nullptr;
+};
+
+swap_chain_targets resolve_targets() noexcept {
+    swap_chain_targets targets;
+    HWND window = create_dummy_window();
+    if (!window) return targets;
+
+    DXGI_SWAP_CHAIN_DESC description{};
     description.BufferCount = 1;
     description.BufferDesc.Width = 8;
     description.BufferDesc.Height = 8;
@@ -113,93 +106,21 @@ PresentFn present_from(DXGI_SWAP_CHAIN_DESC& description, HWND window) noexcept 
         const HRESULT created = D3D11CreateDeviceAndSwapChain(nullptr, type, nullptr, 0, levels,
             static_cast<UINT>(sizeof(levels) / sizeof(levels[0])), D3D11_SDK_VERSION, &description,
             &chain, &device, nullptr, &context);
-        PresentFn present = nullptr;
-        if (SUCCEEDED(created) && chain) present = reinterpret_cast<PresentFn>(method(chain, present_index));
-        if (chain) release(chain);
-        if (context) release(context);
-        if (device) release(device);
-        if (present) return present;
-    }
-    return nullptr;
-}
-
-PresentFn resolve_present() noexcept {
-    HWND window = create_dummy_window();
-    if (!window) return nullptr;
-    DXGI_SWAP_CHAIN_DESC description{};
-    const PresentFn present = present_from(description, window);
-    DestroyWindow(window);
-    return present;
-}
-
-class parked_threads {
-public:
-    parked_threads() = default;
-    parked_threads(const parked_threads&) = delete;
-    parked_threads& operator=(const parked_threads&) = delete;
-
-    ~parked_threads() { release(); }
-
-    // Returns false if the process is already unsafe to patch. Look at unsafe().
-    bool park(const void* region, std::size_t size) noexcept {
-        const auto process = GetCurrentProcessId();
-        const auto self = GetCurrentThreadId();
-        HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-        if (snapshot == INVALID_HANDLE_VALUE) return false;
-        THREADENTRY32 entry{};
-        entry.dwSize = sizeof(entry);
-        bool completed = Thread32First(snapshot, &entry) != FALSE;
-        while (completed) {
-            if (entry.th32OwnerProcessID == process && entry.th32ThreadID != self) {
-                HANDLE thread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT |
-                                           THREAD_QUERY_INFORMATION, FALSE, entry.th32ThreadID);
-                if (!thread) {
-                    unsafe_ = true;
-                    completed = false;
-                    break;
-                }
-                if (SuspendThread(thread) == static_cast<DWORD>(-1)) {
-                    CloseHandle(thread);
-                    completed = false;
-                    break;
-                }
-                threads_.push_back(thread);
-                CONTEXT context{};
-                context.ContextFlags = CONTEXT_CONTROL;
-                if (GetThreadContext(thread, &context)) {
-                    const auto instruction = reinterpret_cast<std::uintptr_t>(context.Rip);
-                    const auto begin = reinterpret_cast<std::uintptr_t>(region);
-                    if (instruction >= begin && instruction < begin + size) unsafe_ = true;
-                }
+        if (SUCCEEDED(created) && chain) {
+            targets.present = method_address(chain, present_index);
+            IDXGISwapChain1* chain1 = nullptr;
+            if (SUCCEEDED(chain->QueryInterface(IID_IDXGISwapChain1, reinterpret_cast<void**>(&chain1))) && chain1) {
+                targets.present1 = method_address(chain1, present1_index);
+                chain1->Release();
             }
-            entry.dwSize = sizeof(entry);
-            completed = Thread32Next(snapshot, &entry) != FALSE;
+            chain->Release();
         }
-        CloseHandle(snapshot);
-        if (!completed) {
-            unsafe_ = true;
-            return false;
-        }
-        return true;
+        if (context) context->Release();
+        if (device) device->Release();
+        if (targets.present) break;
     }
-
-    bool unsafe() const noexcept { return unsafe_; }
-
-    void release() noexcept {
-        for (HANDLE thread : threads_) {
-            ResumeThread(thread);
-            CloseHandle(thread);
-        }
-        threads_.clear();
-    }
-
-private:
-    std::vector<HANDLE> threads_;
-    bool unsafe_ = false;
-};
-
-void report(const wchar_t* text) noexcept {
-    OutputDebugStringW(text);
+    DestroyWindow(window);
+    return targets;
 }
 
 void sample_frame() noexcept {
@@ -220,19 +141,99 @@ void sample_frame() noexcept {
 
     wchar_t message[192];
     const int written = std::swprintf(message, sizeof(message) / sizeof(message[0]),
-        L"renderer_hook: frame spike %.2f ms (frame %llu).\n",
-        static_cast<double>(nanoseconds) / 1000000.0, frame);
+        L"renderer_hook: frame spike %.2f ms (frame %llu).\n", milliseconds, frame);
     if (written > 0) OutputDebugStringW(message);
 }
 
-HRESULT WINAPI hkPresent(IDXGISwapChain* swap_chain, UINT interval, UINT flags) noexcept {
-    const PresentFn original = g_original.load(std::memory_order_acquire);
-    if (!original) return E_FAIL;
+bool acquire_device(IDXGISwapChain* chain) noexcept {
+    ID3D11Device* device = nullptr;
+    if (FAILED(chain->GetDevice(iid_id3d11_device, reinterpret_cast<void**>(&device))) || !device) {
+        return false;
+    }
+    if (device != g_device) {
+        if (g_context) {
+            g_context->Release();
+            g_context = nullptr;
+        }
+        if (g_device) {
+            g_device->Release();
+            g_device = nullptr;
+        }
+        device->GetImmediateContext(&g_context);
+        g_device = device;
+    } else {
+        device->Release();
+    }
+    return g_context != nullptr;
+}
+
+unsigned current_buffer(IDXGISwapChain* chain, unsigned buffer_count) noexcept {
+    if (g_chain3_owner != chain) {
+        if (g_chain3) {
+            g_chain3->Release();
+            g_chain3 = nullptr;
+        }
+        g_chain3_owner = chain;
+        if (FAILED(chain->QueryInterface(IID_IDXGISwapChain3, reinterpret_cast<void**>(&g_chain3)))) {
+            g_chain3 = nullptr;
+        }
+    }
+    if (!g_chain3) return 0;
+    const unsigned index = g_chain3->GetCurrentBackBufferIndex();
+    return index < buffer_count ? index : 0;
+}
+
+void draw_overlay(IDXGISwapChain* chain) noexcept {
+    if (!acquire_device(chain)) return;
+    DXGI_SWAP_CHAIN_DESC description{};
+    if (FAILED(chain->GetDesc(&description))) return;
+    const unsigned buffer_count = description.BufferCount ? description.BufferCount : 1;
+    const unsigned index = current_buffer(chain, buffer_count);
+
+    ID3D11Texture2D* buffer = nullptr;
+    if (FAILED(chain->GetBuffer(index, iid_id3d11_texture2d, reinterpret_cast<void**>(&buffer))) || !buffer) return;
+    D3D11_TEXTURE2D_DESC texture{};
+    buffer->GetDesc(&texture);
+    ID3D11RenderTargetView* target = nullptr;
+    const HRESULT viewed = g_device->CreateRenderTargetView(buffer, nullptr, &target);
+    buffer->Release();
+    if (FAILED(viewed) || !target) return;
+
+    overlay::stats values{};
+    values.fps = t_frame.fps;
+    values.frame_ms = t_frame.frame_ms;
+    values.presents = g_frames.load(std::memory_order_relaxed);
+    values.back_buffer = index;
+    values.buffer_count = buffer_count;
+    values.present_mode = swap_effect_name(description.SwapEffect);
+    overlay::render(g_device, g_context, target, texture.Width, texture.Height, values);
+    target->Release();
+
+    if (!g_reported) {
+        g_reported = true;
+        wchar_t message[192];
+        const int written = std::swprintf(message, sizeof(message) / sizeof(message[0]),
+            L"renderer_hook: overlay drawing into buffer %u of %u at %ux%u.\n",
+            index, buffer_count, texture.Width, texture.Height);
+        if (written > 0) OutputDebugStringW(message);
+    }
+}
+
+HRESULT WINAPI hkPresent(IDXGISwapChain* chain, UINT interval, UINT flags) noexcept {
     sample_frame();
-    report_presentation(swap_chain);
-    // The overlay draw is the last submission on the immediate context before Present.
-    overlay::render(swap_chain, t_frame.fps, t_frame.frame_ms);
-    return original(swap_chain, interval, flags);
+    draw_overlay(chain);
+    return g_present ? g_present(chain, interval, flags) : E_FAIL;
+}
+
+HRESULT WINAPI hkPresent1(IDXGISwapChain1* chain, UINT interval, UINT flags,
+                          const DXGI_PRESENT_PARAMETERS* parameters) noexcept {
+    sample_frame();
+    draw_overlay(chain);
+    return g_present1 ? g_present1(chain, interval, flags, parameters) : E_FAIL;
+}
+
+void report(const wchar_t* text) noexcept {
+    OutputDebugStringW(text);
 }
 
 }  // namespace
@@ -242,37 +243,44 @@ unsigned long long frame_count() noexcept {
 }
 
 bool install() noexcept {
-    if (g_original.load(std::memory_order_acquire)) return true;
+    if (g_present) return true;
     if (!QueryPerformanceFrequency(&g_frequency) || g_frequency.QuadPart <= 0) {
         report(L"renderer_hook: performance counter is unavailable; Present not hooked.\n");
         return false;
     }
-    PresentFn present = resolve_present();
-    if (!present) {
+    const swap_chain_targets targets = resolve_targets();
+    if (!targets.present) {
         report(L"renderer_hook: DXGI swap chain creation failed; Present not hooked.\n");
         return false;
     }
 
-    try {
-        parked_threads parked;
-        const void* target = reinterpret_cast<const void*>(present);
-        const bool parked_ok = parked.park(target, hook::max_patch_span);
-        const bool installed = parked_ok && !parked.unsafe() &&
-            g_hook.install(const_cast<void*>(target), reinterpret_cast<void*>(&hkPresent));
-        parked.release();
-        if (!installed) {
-            report(parked.unsafe()
-                ? L"renderer_hook: a thread was inside the Present prologue; hook skipped.\n"
-                : L"renderer_hook: Present prologue could not be hooked.\n");
-            return false;
-        }
-    } catch (...) {
-        report(L"renderer_hook: thread parking failed; Present not hooked.\n");
+    const MH_STATUS initialized = MH_Initialize();
+    if (initialized != MH_OK && initialized != MH_ERROR_ALREADY_INITIALIZED) {
+        report(L"renderer_hook: MinHook initialization failed; Present not hooked.\n");
         return false;
     }
-
-    g_original.store(reinterpret_cast<PresentFn>(g_hook.trampoline()), std::memory_order_release);
-    report(L"renderer_hook: IDXGISwapChain::Present hooked.\n");
+    MH_STATUS status = MH_CreateHook(targets.present, reinterpret_cast<LPVOID>(&hkPresent),
+                                     reinterpret_cast<LPVOID*>(&g_present));
+    if (status != MH_OK) {
+        report(L"renderer_hook: MinHook could not hook IDXGISwapChain::Present.\n");
+        return false;
+    }
+    if (targets.present1) {
+        status = MH_CreateHook(targets.present1, reinterpret_cast<LPVOID>(&hkPresent1),
+                               reinterpret_cast<LPVOID*>(&g_present1));
+        if (status != MH_OK) {
+            report(L"renderer_hook: IDXGISwapChain1::Present1 is unavailable; Present only.\n");
+            g_present1 = nullptr;
+        }
+    }
+    if (MH_EnableHook(MH_ALL_HOOKS) != MH_OK) {
+        report(L"renderer_hook: MinHook could not enable the Present hooks.\n");
+        g_present = nullptr;
+        g_present1 = nullptr;
+        return false;
+    }
+    report(g_present1 ? L"renderer_hook: Present and Present1 hooked through MinHook.\n"
+                      : L"renderer_hook: Present hooked through MinHook.\n");
     return true;
 }
 
