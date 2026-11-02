@@ -11,6 +11,10 @@ namespace overlay {
 // Flipped by Insert; while set, the window takes mouse input and draws a software cursor.
 extern std::atomic<bool> g_overlay_interactive;
 
+// True once the ImGui context and both backends are alive; the window procedure checks it
+// before forwarding messages, because ImGui asserts on input without a context.
+bool ready() noexcept;
+
 constexpr int toggle_key = VK_INSERT;
 
 struct stats {
@@ -20,6 +24,7 @@ struct stats {
     unsigned back_buffer;
     unsigned buffer_count;
     const char* present_mode;
+    HWND window;
 };
 
 // Draws the telemetry window onto the given render target. Render thread only.

@@ -1,5 +1,11 @@
 #include "dx_hook.h"
 #include "overlay.h"
+#include "imgui.h"
+#include "imgui_impl_win32.h"
+
+// Declared here per the backend's own instructions; the header keeps it commented out.
+extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND window, UINT message,
+                                                             WPARAM wparam, LPARAM lparam);
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -33,6 +39,9 @@ std::atomic<unsigned long long> g_frames{0};
 LARGE_INTEGER g_frequency{};
 bool g_reported = false;
 bool g_device_reported = false;
+
+HWND g_window = nullptr;
+WNDPROC g_original_wndproc = nullptr;
 
 ID3D11Device* g_device = nullptr;
 ID3D11DeviceContext* g_context = nullptr;
@@ -188,6 +197,65 @@ unsigned current_buffer(IDXGISwapChain* chain, unsigned buffer_count) noexcept {
     return index < buffer_count ? index : 0;
 }
 
+bool is_overlay_window_message(UINT message) noexcept {
+    switch (message) {
+    case WM_MOUSEMOVE:
+    case WM_LBUTTONDOWN:
+    case WM_LBUTTONUP:
+    case WM_LBUTTONDBLCLK:
+    case WM_RBUTTONDOWN:
+    case WM_RBUTTONUP:
+    case WM_RBUTTONDBLCLK:
+    case WM_MBUTTONDOWN:
+    case WM_MBUTTONUP:
+    case WM_MOUSEWHEEL:
+    case WM_MOUSEHWHEEL:
+        return true;
+    default:
+        return false;
+    }
+}
+
+LRESULT CALLBACK hkWndProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
+    // Insert belongs to the overlay in both modes and never reaches the engine.
+    if (message == WM_KEYDOWN && wparam == static_cast<WPARAM>(overlay::toggle_key) &&
+        (lparam & 0x40000000) == 0) {
+        const bool interactive = !overlay::g_overlay_interactive.load(std::memory_order_relaxed);
+        overlay::g_overlay_interactive.store(interactive, std::memory_order_relaxed);
+        OutputDebugStringW(interactive
+            ? L"renderer_hook: overlay interaction enabled.\n"
+            : L"renderer_hook: overlay interaction disabled.\n");
+        return 0;
+    }
+
+    if (overlay::g_overlay_interactive.load(std::memory_order_relaxed) && overlay::ready()) {
+        // The platform backend converts the raw message before the engine sees the coordinates,
+        // so the pointer keeps moving even while the game tries to recentre it.
+        ImGui_ImplWin32_WndProcHandler(window, message, wparam, lparam);
+        if (is_overlay_window_message(message)) return 0;
+    }
+
+    if (g_original_wndproc) return CallWindowProcW(g_original_wndproc, window, message, wparam, lparam);
+    return DefWindowProcW(window, message, wparam, lparam);
+}
+
+void subclass_window(HWND window) noexcept {
+    if (!window || window == g_window) return;
+    if (g_window && g_original_wndproc) {
+        SetWindowLongPtrW(g_window, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(g_original_wndproc));
+        g_window = nullptr;
+        g_original_wndproc = nullptr;
+    }
+    const auto previous = SetWindowLongPtrW(window, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&hkWndProc));
+    if (!previous || previous == reinterpret_cast<LONG_PTR>(&hkWndProc)) {
+        OutputDebugStringW(L"renderer_hook: could not subclass the game window.\n");
+        return;
+    }
+    g_window = window;
+    g_original_wndproc = reinterpret_cast<WNDPROC>(previous);
+    OutputDebugStringW(L"renderer_hook: game window subclassed for overlay input.\n");
+}
+
 void draw_overlay(IDXGISwapChain* chain) noexcept {
     if (!acquire_device(chain)) {
         if (!g_device_reported) {
@@ -198,6 +266,7 @@ void draw_overlay(IDXGISwapChain* chain) noexcept {
     }
     DXGI_SWAP_CHAIN_DESC description{};
     if (FAILED(chain->GetDesc(&description))) return;
+    subclass_window(description.OutputWindow);
     const unsigned buffer_count = description.BufferCount ? description.BufferCount : 1;
     const unsigned index = current_buffer(chain, buffer_count);
 
@@ -217,6 +286,7 @@ void draw_overlay(IDXGISwapChain* chain) noexcept {
     values.back_buffer = index;
     values.buffer_count = buffer_count;
     values.present_mode = swap_effect_name(description.SwapEffect);
+    values.window = description.OutputWindow;
     overlay::render(g_device, g_context, target, texture.Width, texture.Height, values);
     target->Release();
 

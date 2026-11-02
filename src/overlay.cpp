@@ -1,6 +1,7 @@
 #include "overlay.h"
 #include "imgui.h"
 #include "imgui_impl_dx11.h"
+#include "imgui_impl_win32.h"
 #include "optimization.h"
 
 #include <atomic>
@@ -24,34 +25,30 @@ constexpr ImGuiWindowFlags window_flags =
     ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
     ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav;
 
-bool g_toggle_down = false;
+bool g_clip_saved = false;
+RECT g_saved_clip{};
 
-// Edge-detected so a held key flips the state once.
-void poll_toggle() noexcept {
-    const bool down = (GetAsyncKeyState(toggle_key) & 0x8000) != 0;
-    if (down && !g_toggle_down) {
-        const bool interactive = !g_overlay_interactive.load(std::memory_order_relaxed);
-        g_overlay_interactive.store(interactive, std::memory_order_relaxed);
-        OutputDebugStringW(interactive
-            ? L"renderer_hook: overlay interaction enabled.\n"
-            : L"renderer_hook: overlay interaction disabled.\n");
+// The game confines the pointer to a rect while driving; that clip is what pins the cursor.
+// Restoring it on the way out hands control back exactly as it was before the overlay opened.
+void set_cursor_lock(bool engaged, HWND window) noexcept {
+    if (engaged && !g_clip_saved) {
+        RECT clip{};
+        if (GetClipCursor(&clip)) {
+            g_saved_clip = clip;
+            g_clip_saved = true;
+        }
+        ClipCursor(nullptr);
+        if (GetCapture() == window) ReleaseCapture();
+    } else if (!engaged && g_clip_saved) {
+        ClipCursor(&g_saved_clip);
+        g_clip_saved = false;
     }
-    g_toggle_down = down;
-}
-
-// Without a platform backend ImGui receives no mouse state unless it is fed here.
-void feed_input(ImGuiIO& io, bool interactive, bool click) noexcept {
-    POINT cursor{};
-    if (!GetCursorPos(&cursor)) return;
-    HWND window = GetForegroundWindow();
-    if (window) ScreenToClient(window, &cursor);
-    io.AddMousePosEvent(static_cast<float>(cursor.x), static_cast<float>(cursor.y));
-    io.AddMouseButtonEvent(0, interactive && click);
 }
 
 void stop() noexcept {
     if (g_running) {
         ImGui_ImplDX11_Shutdown();
+        ImGui_ImplWin32_Shutdown();
         ImGui::DestroyContext();
         g_running = false;
     }
@@ -65,24 +62,29 @@ void stop() noexcept {
     }
 }
 
-bool start(ID3D11Device* device, ID3D11DeviceContext* context) noexcept {
+bool start(ID3D11Device* device, ID3D11DeviceContext* context, HWND window) noexcept {
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
-    // The overlay is display-only: no input backend, no cursor capture, no ini file on disk.
+    // No configuration file is written next to the game.
     io.IniFilename = nullptr;
     io.LogFilename = nullptr;
-    io.ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
     io.MouseDrawCursor = false;
     ImGui::StyleColorsDark();
     ImGui::GetStyle().WindowRounding = 4.0f;
     ImGui::GetStyle().WindowBorderSize = 1.0f;
+    if (!ImGui_ImplWin32_Init(window)) {
+        ImGui::DestroyContext();
+        return false;
+    }
     if (!ImGui_ImplDX11_Init(device, context)) {
+        ImGui_ImplWin32_Shutdown();
         ImGui::DestroyContext();
         return false;
     }
     // The backend builds its shaders lazily; failing here is reported instead of an empty frame.
     if (!ImGui_ImplDX11_CreateDeviceObjects()) {
         ImGui_ImplDX11_Shutdown();
+        ImGui_ImplWin32_Shutdown();
         ImGui::DestroyContext();
         return false;
     }
@@ -134,6 +136,10 @@ void draw(const stats& values, bool interactive) noexcept {
 
 }  // namespace
 
+bool ready() noexcept {
+    return g_running;
+}
+
 bool render(ID3D11Device* device, ID3D11DeviceContext* context, ID3D11RenderTargetView* target,
             unsigned width, unsigned height, const stats& values) noexcept {
     if (!device || !context || !target || !width || !height) {
@@ -148,7 +154,7 @@ bool render(ID3D11Device* device, ID3D11DeviceContext* context, ID3D11RenderTarg
         // Retried a bounded number of times: re-creating the backend every present would
         // rebuild the font atlas and shaders at frame rate.
         if (g_failures >= max_start_attempts) return false;
-        if (!start(device, context)) {
+        if (!start(device, context, values.window)) {
             if (++g_failures == 1) {
                 OutputDebugStringW(L"renderer_hook: ImGui Direct3D 11 backend failed to start.\n");
             }
@@ -171,21 +177,17 @@ bool render(ID3D11Device* device, ID3D11DeviceContext* context, ID3D11RenderTarg
     context->OMSetRenderTargets(1, &target, nullptr);
     context->RSSetViewports(1, &viewport);
 
-    // Without a platform backend ImGui has no window size, clock or input of its own.
+    const bool interactive = g_overlay_interactive.load(std::memory_order_relaxed);
+    set_cursor_lock(interactive, values.window);
+
     ImGuiIO& io = ImGui::GetIO();
+    io.MouseDrawCursor = interactive;
+    ImGui_ImplWin32_NewFrame();
+    // The back buffer is authoritative for the draw scale, whatever the window reports.
     io.DisplaySize = ImVec2(static_cast<float>(width), static_cast<float>(height));
     io.DisplayFramebufferScale = ImVec2(1.0f, 1.0f);
     const float delta = values.frame_ms > 0.0 ? static_cast<float>(values.frame_ms / 1000.0) : 1.0f / 60.0f;
     io.DeltaTime = delta > 0.0f && delta < 1.0f ? delta : 1.0f / 60.0f;
-
-    poll_toggle();
-    const bool interactive = g_overlay_interactive.load(std::memory_order_relaxed);
-    const bool click = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
-    feed_input(io, interactive, click);
-    // The software cursor is drawn by ImGui itself: the game hides the hardware one with
-    // ShowCursor, and balancing that reference count from here would fight the engine.
-    io.MouseDrawCursor = interactive;
-
     ImGui_ImplDX11_NewFrame();
     ImGui::NewFrame();
     draw(values, interactive);

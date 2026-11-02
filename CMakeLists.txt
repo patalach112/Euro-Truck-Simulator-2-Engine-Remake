@@ -29,9 +29,10 @@ add_library(imgui STATIC
     third_party/imgui/imgui_draw.cpp
     third_party/imgui/imgui_tables.cpp
     third_party/imgui/imgui_widgets.cpp
-    third_party/imgui/backends/imgui_impl_dx11.cpp)
+    third_party/imgui/backends/imgui_impl_dx11.cpp
+    third_party/imgui/backends/imgui_impl_win32.cpp)
 target_include_directories(imgui PUBLIC third_party/imgui third_party/imgui/backends)
-target_link_libraries(imgui PUBLIC d3d11)
+target_link_libraries(imgui PUBLIC d3d11 user32 dwmapi)
 
 add_library(renderer_hook SHARED
     src/renderer_hook.cpp src/renderer_hook.h
