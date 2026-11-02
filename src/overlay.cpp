@@ -7,6 +7,9 @@
 #include <cwchar>
 
 namespace overlay {
+
+std::atomic<bool> g_overlay_interactive{false};
+
 namespace {
 
 ID3D11Device* g_device = nullptr;
@@ -18,8 +21,33 @@ bool g_draw_reported = false;
 constexpr unsigned max_start_attempts = 5;
 
 constexpr ImGuiWindowFlags window_flags =
-    ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_AlwaysAutoResize |
+    ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
     ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav;
+
+bool g_toggle_down = false;
+
+// Edge-detected so a held key flips the state once.
+void poll_toggle() noexcept {
+    const bool down = (GetAsyncKeyState(toggle_key) & 0x8000) != 0;
+    if (down && !g_toggle_down) {
+        const bool interactive = !g_overlay_interactive.load(std::memory_order_relaxed);
+        g_overlay_interactive.store(interactive, std::memory_order_relaxed);
+        OutputDebugStringW(interactive
+            ? L"renderer_hook: overlay interaction enabled.\n"
+            : L"renderer_hook: overlay interaction disabled.\n");
+    }
+    g_toggle_down = down;
+}
+
+// Without a platform backend ImGui receives no mouse state unless it is fed here.
+void feed_input(ImGuiIO& io, bool interactive, bool click) noexcept {
+    POINT cursor{};
+    if (!GetCursorPos(&cursor)) return;
+    HWND window = GetForegroundWindow();
+    if (window) ScreenToClient(window, &cursor);
+    io.AddMousePosEvent(static_cast<float>(cursor.x), static_cast<float>(cursor.y));
+    io.AddMouseButtonEvent(0, interactive && click);
+}
 
 void stop() noexcept {
     if (g_running) {
@@ -44,6 +72,7 @@ bool start(ID3D11Device* device, ID3D11DeviceContext* context) noexcept {
     io.IniFilename = nullptr;
     io.LogFilename = nullptr;
     io.ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
+    io.MouseDrawCursor = false;
     ImGui::StyleColorsDark();
     ImGui::GetStyle().WindowRounding = 4.0f;
     ImGui::GetStyle().WindowBorderSize = 1.0f;
@@ -79,12 +108,15 @@ void draw_optimization() noexcept {
     ImGui::Text("Skipped      %llu", state.skipped);
 }
 
-void draw(const stats& values) noexcept {
+void draw(const stats& values, bool interactive) noexcept {
     ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f), ImGuiCond_Always);
     ImGui::SetNextWindowSize(ImVec2(340.0f, 0.0f), ImGuiCond_Always);
     ImGui::SetNextWindowCollapsed(false, ImGuiCond_Always);
     ImGui::SetNextWindowBgAlpha(0.65f);
-    if (ImGui::Begin("ETS2 Engine Remake", nullptr, window_flags)) {
+    if (interactive) ImGui::SetNextWindowFocus();
+    ImGuiWindowFlags flags = window_flags;
+    if (!interactive) flags |= ImGuiWindowFlags_NoInputs;
+    if (ImGui::Begin("ETS2 Engine Remake", nullptr, flags)) {
         ImGui::TextColored(ImVec4(0.35f, 1.0f, 0.45f, 1.0f), "ETS2 ENGINE REMAKE - CORE ACTIVE");
         ImGui::Separator();
         ImGui::Text("FPS          %.1f", values.fps);
@@ -93,6 +125,9 @@ void draw(const stats& values) noexcept {
         ImGui::Text("Swap effect  %s", values.present_mode);
         ImGui::Text("Back buffer  %u of %u", values.back_buffer, values.buffer_count);
         draw_optimization();
+        if (!interactive) {
+            ImGui::TextDisabled("Insert: interact");
+        }
     }
     ImGui::End();
 }
@@ -143,9 +178,17 @@ bool render(ID3D11Device* device, ID3D11DeviceContext* context, ID3D11RenderTarg
     const float delta = values.frame_ms > 0.0 ? static_cast<float>(values.frame_ms / 1000.0) : 1.0f / 60.0f;
     io.DeltaTime = delta > 0.0f && delta < 1.0f ? delta : 1.0f / 60.0f;
 
+    poll_toggle();
+    const bool interactive = g_overlay_interactive.load(std::memory_order_relaxed);
+    const bool click = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+    feed_input(io, interactive, click);
+    // The software cursor is drawn by ImGui itself: the game hides the hardware one with
+    // ShowCursor, and balancing that reference count from here would fight the engine.
+    io.MouseDrawCursor = interactive;
+
     ImGui_ImplDX11_NewFrame();
     ImGui::NewFrame();
-    draw(values);
+    draw(values, interactive);
     ImGui::Render();
 
     ImDrawData* commands = ImGui::GetDrawData();

@@ -4,7 +4,14 @@
 #include <windows.h>
 #include <d3d11.h>
 
+#include <atomic>
+
 namespace overlay {
+
+// Flipped by Insert; while set, the window takes mouse input and draws a software cursor.
+extern std::atomic<bool> g_overlay_interactive;
+
+constexpr int toggle_key = VK_INSERT;
 
 struct stats {
     double fps;
