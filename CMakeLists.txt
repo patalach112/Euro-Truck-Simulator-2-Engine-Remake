@@ -41,6 +41,7 @@ add_library(renderer_hook SHARED
     src/scanner.cpp src/scanner.h
     src/dx_hook.cpp src/dx_hook.h
     src/overlay.cpp src/overlay.h
+    src/optimization.cpp src/optimization.h
     src/d3dcompiler_shim.cpp
     src/renderer_hook.def)
 set_target_properties(renderer_hook PROPERTIES PREFIX "")

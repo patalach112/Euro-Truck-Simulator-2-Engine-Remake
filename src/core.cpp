@@ -1,5 +1,6 @@
 #include "core.h"
 #include "dx_hook.h"
+#include "optimization.h"
 #include "profiler.h"
 #include "scanner.h"
 
@@ -48,6 +49,7 @@ void start(HMODULE module) noexcept {
         match ? L"found" : L"not found", static_cast<const void*>(match));
     if (written > 0) OutputDebugStringW(message);
 
+    optimization::install();
     if (!dx_hook::install()) {
         OutputDebugStringW(L"renderer_hook: continuing without the render overlay.\n");
     }

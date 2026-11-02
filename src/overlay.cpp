@@ -1,7 +1,9 @@
 #include "overlay.h"
 #include "imgui.h"
 #include "imgui_impl_dx11.h"
+#include "optimization.h"
 
+#include <atomic>
 #include <cwchar>
 
 namespace overlay {
@@ -62,6 +64,20 @@ bool start(ID3D11Device* device, ID3D11DeviceContext* context) noexcept {
     return true;
 }
 
+void draw_optimization() noexcept {
+    const optimization::report state = optimization::status();
+    ImGui::Separator();
+    bool disable = optimization::g_disable_remote_lights.load(std::memory_order_relaxed);
+    if (ImGui::Checkbox("Optimize Crowd FPS (Disable Remote Lights/Beacons)", &disable)) {
+        optimization::g_disable_remote_lights.store(disable, std::memory_order_relaxed);
+    }
+    if (!state.classifier) {
+        ImGui::TextDisabled("no entity classifier: calls are forwarded");
+    }
+    ImGui::Text("Light calls  %llu", state.calls);
+    ImGui::Text("Skipped      %llu", state.skipped);
+}
+
 void draw(const stats& values) noexcept {
     ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f), ImGuiCond_Always);
     ImGui::SetNextWindowSize(ImVec2(340.0f, 0.0f), ImGuiCond_Always);
@@ -75,6 +91,7 @@ void draw(const stats& values) noexcept {
         ImGui::Text("Presents     %llu", values.presents);
         ImGui::Text("Swap effect  %s", values.present_mode);
         ImGui::Text("Back buffer  %u of %u", values.back_buffer, values.buffer_count);
+        draw_optimization();
     }
     ImGui::End();
 }
