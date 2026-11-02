@@ -5,7 +5,6 @@
 
 namespace renderer_hook {
 
-void log_loaded() noexcept;
-DWORD WINAPI initialize(void* parameter) noexcept;
+DWORD WINAPI initialize(void* instance) noexcept;
 
 }  // namespace renderer_hook

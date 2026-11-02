@@ -16,7 +16,10 @@ if(NOT RENDERER_HOOK_X64)
     message(FATAL_ERROR "This project requires an x64 toolchain.")
 endif()
 
-add_library(renderer_hook SHARED src/renderer_hook.cpp src/renderer_hook.h)
+add_library(renderer_hook SHARED
+    src/renderer_hook.cpp src/renderer_hook.h
+    src/scanner.cpp src/scanner.h
+    src/hook.cpp src/hook.h)
 set_target_properties(renderer_hook PROPERTIES PREFIX "")
 add_executable(Injector src/injector.cpp)
 
@@ -26,6 +29,8 @@ if(MSVC)
     target_compile_options(renderer_hook PRIVATE /W4 /permissive-)
     target_compile_options(Injector PRIVATE /W4 /permissive-)
 else()
+    target_link_options(renderer_hook PRIVATE -static -static-libgcc -static-libstdc++)
+    target_link_options(Injector PRIVATE -static -static-libgcc -static-libstdc++)
     target_compile_options(renderer_hook PRIVATE -Wall -Wextra)
     target_compile_options(Injector PRIVATE -Wall -Wextra)
 endif()
