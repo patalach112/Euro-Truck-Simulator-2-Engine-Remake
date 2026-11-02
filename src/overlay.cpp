@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <cwchar>
 
 namespace overlay {
 namespace {
@@ -107,6 +108,7 @@ ID3D11BlendState* g_blend = nullptr;
 ID3D11RasterizerState* g_rasterizer = nullptr;
 ID3D11DepthStencilState* g_depth = nullptr;
 bool g_unavailable = false;
+bool g_reported = false;
 
 constexpr GUID iid_id3d11_device = {0xdb6f6ddb, 0xac77, 0x4e88,
     {0x82, 0x53, 0x81, 0x9d, 0xf9, 0xbb, 0xf1, 0x40}};
@@ -417,23 +419,40 @@ struct pipeline_state {
 
 bool render(IDXGISwapChain* swap_chain, double fps, double frame_ms) noexcept {
     if (!swap_chain || g_unavailable) return false;
-    const auto get_desc = com_method<get_desc_fn>(swap_chain, 12);
-    if (!get_desc) return false;
-    DXGI_SWAP_CHAIN_DESC description{};
-    if (FAILED(get_desc(swap_chain, &description))) return false;
-    const auto width = description.BufferDesc.Width;
-    const auto height = description.BufferDesc.Height;
-    if (!width || !height || width < static_cast<UINT>(panel_x + panel_width) ||
-        height < static_cast<UINT>(panel_y + panel_height)) return false;
-    if (!g_device && !initialize(swap_chain)) return false;
-
     const auto get_buffer = com_method<get_buffer_fn>(swap_chain, 9);
     ID3D11Texture2D* buffer = nullptr;
     if (!get_buffer || FAILED(get_buffer(swap_chain, 0, &iid_id3d11_texture2d,
                                          reinterpret_cast<void**>(&buffer))) || !buffer) return false;
-    ID3D11RenderTargetView* target = nullptr;
-    if (FAILED(g_device->CreateRenderTargetView(buffer, nullptr, &target))) {
+    if (!g_device && !initialize(swap_chain)) {
         buffer->Release();
+        return false;
+    }
+
+    // The swap chain description can carry stale or zero dimensions; the texture is authoritative.
+    D3D11_TEXTURE2D_DESC texture{};
+    buffer->GetDesc(&texture);
+    UINT width = texture.Width;
+    UINT height = texture.Height;
+    if (!width || !height) {
+        const auto get_desc = com_method<get_desc_fn>(swap_chain, 12);
+        DXGI_SWAP_CHAIN_DESC description{};
+        if (get_desc && SUCCEEDED(get_desc(swap_chain, &description))) {
+            width = description.BufferDesc.Width;
+            height = description.BufferDesc.Height;
+        }
+    }
+    if (!width || !height || width < static_cast<UINT>(panel_x + panel_width) ||
+        height < static_cast<UINT>(panel_y + panel_height)) {
+        buffer->Release();
+        return false;
+    }
+
+    ID3D11RenderTargetView* target = nullptr;
+    const HRESULT viewed = g_device->CreateRenderTargetView(buffer, nullptr, &target);
+    buffer->Release();
+    if (FAILED(viewed) || !target) {
+        g_unavailable = true;
+        OutputDebugStringW(L"renderer_hook: no render target view for the back buffer; overlay disabled.\n");
         return false;
     }
 
@@ -470,13 +489,16 @@ bool render(IDXGISwapChain* swap_chain, double fps, double frame_ms) noexcept {
     if (uploaded) {
         const UINT stride = 4 * sizeof(float);
         const UINT offset = 0;
-        D3D11_VIEWPORT viewport{0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height),
-                                0.0f, 1.0f};
-        g_context->OMSetRenderTargets(1, &target, nullptr);
-        g_context->RSSetViewports(1, &viewport);
-        g_context->RSSetState(g_rasterizer);
-        g_context->OMSetDepthStencilState(g_depth, 0);
-        g_context->OMSetBlendState(g_blend, nullptr, 0xffffffff);
+        // The quad is expressed in clip space for the whole buffer, so the viewport has to
+        // span the buffer as well; a panel-sized viewport would rescale and shift it.
+        D3D11_VIEWPORT viewport{};
+        viewport.TopLeftX = 0.0f;
+        viewport.TopLeftY = 0.0f;
+        viewport.Width = static_cast<float>(width);
+        viewport.Height = static_cast<float>(height);
+        viewport.MinDepth = 0.0f;
+        viewport.MaxDepth = 1.0f;
+
         g_context->IASetInputLayout(g_input_layout);
         g_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
         g_context->IASetVertexBuffers(0, 1, &g_vertices, &stride, &offset);
@@ -486,11 +508,28 @@ bool render(IDXGISwapChain* swap_chain, double fps, double frame_ms) noexcept {
         g_context->PSSetShader(g_pixel_shader, nullptr, 0);
         g_context->PSSetShaderResources(0, 1, &g_panel_view);
         g_context->PSSetSamplers(0, 1, &g_sampler);
+        g_context->RSSetState(g_rasterizer);
+        g_context->RSSetViewports(1, &viewport);
+        // The rasterizer state has scissor testing off; clearing the list keeps it out of the way
+        // even if another state object with scissor enabled is bound later in the frame.
+        g_context->RSSetScissorRects(0, nullptr);
+        g_context->OMSetDepthStencilState(g_depth, 0);
+        g_context->OMSetBlendState(g_blend, nullptr, 0xffffffff);
+        // A predicate left bound by the engine silently discards draws that fail it.
+        g_context->SetPredication(nullptr, FALSE);
+        g_context->OMSetRenderTargets(1, &target, nullptr);
         g_context->Draw(4, 0);
+
+        if (!g_reported) {
+            g_reported = true;
+            wchar_t message[160];
+            const int written = std::swprintf(message, sizeof(message) / sizeof(message[0]),
+                L"renderer_hook: overlay drawing at %ux%u, panel column %d.\n", width, height, panel_x);
+            if (written > 0) OutputDebugStringW(message);
+        }
     }
     saved.restore(g_context);
     target->Release();
-    buffer->Release();
     return uploaded;
 }
 
