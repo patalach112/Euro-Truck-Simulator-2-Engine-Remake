@@ -8,6 +8,10 @@ namespace hook {
 
 // The caller must keep all threads out of the target, detour and trampoline while
 // installing or removing a hook. This object must outlive the installed hook.
+// Upper bound of the bytes an installation may replace. Callers that park threads
+// over a shared entry point use this to decide which instruction pointers are unsafe.
+inline constexpr std::size_t max_patch_span = 32;
+
 class InlineHook {
 public:
     InlineHook() = default;

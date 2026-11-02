@@ -1,4 +1,5 @@
 #include "renderer_hook.h"
+#include "dx_hook.h"
 #include "scanner.h"
 
 #include <cstdint>
@@ -89,6 +90,16 @@ DWORD WINAPI initialize(void* instance) noexcept {
         if (written > 0) OutputDebugStringW(message);
     } catch (...) {
         OutputDebugStringW(L"renderer_hook: signature scan failed; continuing with simulated telemetry.\n");
+    }
+    const bool hooked = dx_hook::install();
+    if (hooked) {
+        wchar_t message[160];
+        const int written = std::swprintf(message, sizeof(message) / sizeof(message[0]),
+            L"renderer_hook: render loop interception active for %llu presents.\n",
+            dx_hook::frame_count());
+        if (written > 0) OutputDebugStringW(message);
+    } else {
+        OutputDebugStringW(L"renderer_hook: continuing without render loop interception.\n");
     }
     profile();
     return 0;
