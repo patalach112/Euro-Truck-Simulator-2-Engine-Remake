@@ -32,6 +32,7 @@ Present1Fn g_present1 = nullptr;
 std::atomic<unsigned long long> g_frames{0};
 LARGE_INTEGER g_frequency{};
 bool g_reported = false;
+bool g_device_reported = false;
 
 ID3D11Device* g_device = nullptr;
 ID3D11DeviceContext* g_context = nullptr;
@@ -123,6 +124,10 @@ swap_chain_targets resolve_targets() noexcept {
     return targets;
 }
 
+void report(const wchar_t* text) noexcept {
+    OutputDebugStringW(text);
+}
+
 void sample_frame() noexcept {
     LARGE_INTEGER now{};
     if (!QueryPerformanceCounter(&now)) return;
@@ -184,7 +189,13 @@ unsigned current_buffer(IDXGISwapChain* chain, unsigned buffer_count) noexcept {
 }
 
 void draw_overlay(IDXGISwapChain* chain) noexcept {
-    if (!acquire_device(chain)) return;
+    if (!acquire_device(chain)) {
+        if (!g_device_reported) {
+            g_device_reported = true;
+            report(L"renderer_hook: no ID3D11Device on the swap chain, overlay idle.\n");
+        }
+        return;
+    }
     DXGI_SWAP_CHAIN_DESC description{};
     if (FAILED(chain->GetDesc(&description))) return;
     const unsigned buffer_count = description.BufferCount ? description.BufferCount : 1;
@@ -220,6 +231,7 @@ void draw_overlay(IDXGISwapChain* chain) noexcept {
 }
 
 HRESULT WINAPI hkPresent(IDXGISwapChain* chain, UINT interval, UINT flags) noexcept {
+    // Unconditional: every present is a frame in which the overlay is redrawn.
     sample_frame();
     draw_overlay(chain);
     return g_present ? g_present(chain, interval, flags) : E_FAIL;
@@ -230,10 +242,6 @@ HRESULT WINAPI hkPresent1(IDXGISwapChain1* chain, UINT interval, UINT flags,
     sample_frame();
     draw_overlay(chain);
     return g_present1 ? g_present1(chain, interval, flags, parameters) : E_FAIL;
-}
-
-void report(const wchar_t* text) noexcept {
-    OutputDebugStringW(text);
 }
 
 }  // namespace

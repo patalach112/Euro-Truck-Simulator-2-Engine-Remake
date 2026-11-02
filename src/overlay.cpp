@@ -2,13 +2,17 @@
 #include "imgui.h"
 #include "imgui_impl_dx11.h"
 
+#include <cwchar>
+
 namespace overlay {
 namespace {
 
 ID3D11Device* g_device = nullptr;
 ID3D11DeviceContext* g_context = nullptr;
 bool g_running = false;
-bool g_failed = false;
+unsigned g_failures = 0;
+bool g_skip_reported = false;
+bool g_draw_reported = false;
 
 constexpr ImGuiWindowFlags window_flags =
     ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_AlwaysAutoResize |
@@ -60,11 +64,13 @@ bool start(ID3D11Device* device, ID3D11DeviceContext* context) noexcept {
 
 void draw(const stats& values) noexcept {
     ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(340.0f, 0.0f), ImGuiCond_Always);
+    ImGui::SetNextWindowCollapsed(false, ImGuiCond_Always);
     ImGui::SetNextWindowBgAlpha(0.65f);
     if (ImGui::Begin("ETS2 Engine Remake", nullptr, window_flags)) {
-        ImGui::TextColored(ImVec4(0.35f, 1.0f, 0.45f, 1.0f), "CORE ACTIVE");
+        ImGui::TextColored(ImVec4(0.35f, 1.0f, 0.45f, 1.0f), "ETS2 ENGINE REMAKE - CORE ACTIVE");
         ImGui::Separator();
-        ImGui::Text("Frame rate   %.1f fps", values.fps);
+        ImGui::Text("FPS          %.1f", values.fps);
         ImGui::Text("Frame time   %.2f ms", values.frame_ms);
         ImGui::Text("Presents     %llu", values.presents);
         ImGui::Text("Swap effect  %s", values.present_mode);
@@ -77,14 +83,23 @@ void draw(const stats& values) noexcept {
 
 bool render(ID3D11Device* device, ID3D11DeviceContext* context, ID3D11RenderTargetView* target,
             unsigned width, unsigned height, const stats& values) noexcept {
-    if (!device || !context || !target || !width || !height || g_failed) return false;
+    if (!device || !context || !target || !width || !height) {
+        if (!g_skip_reported) {
+            g_skip_reported = true;
+            OutputDebugStringW(L"renderer_hook: overlay skipped, the swap chain has no drawable target.\n");
+        }
+        return false;
+    }
     if (g_device != device) {
         stop();
+        // A partial failure is retried on the next frame instead of silencing the overlay for good.
         if (!start(device, context)) {
-            g_failed = true;
-            OutputDebugStringW(L"renderer_hook: ImGui Direct3D 11 backend failed to start.\n");
+            if (++g_failures <= 3) {
+                OutputDebugStringW(L"renderer_hook: ImGui Direct3D 11 backend failed to start.\n");
+            }
             return false;
         }
+        g_failures = 0;
     }
 
     ID3D11RenderTargetView* previous_targets[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT]{};
@@ -98,16 +113,29 @@ bool render(ID3D11Device* device, ID3D11DeviceContext* context, ID3D11RenderTarg
     context->OMSetRenderTargets(1, &target, nullptr);
     context->RSSetViewports(1, &viewport);
 
-    // Without a platform backend ImGui has no window size or clock of its own.
+    // Without a platform backend ImGui has no window size, clock or input of its own.
     ImGuiIO& io = ImGui::GetIO();
     io.DisplaySize = ImVec2(static_cast<float>(width), static_cast<float>(height));
-    io.DeltaTime = values.frame_ms > 0.0 ? static_cast<float>(values.frame_ms / 1000.0) : 1.0f / 60.0f;
+    io.DisplayFramebufferScale = ImVec2(1.0f, 1.0f);
+    const float delta = values.frame_ms > 0.0 ? static_cast<float>(values.frame_ms / 1000.0) : 1.0f / 60.0f;
+    io.DeltaTime = delta > 0.0f && delta < 1.0f ? delta : 1.0f / 60.0f;
 
     ImGui_ImplDX11_NewFrame();
     ImGui::NewFrame();
     draw(values);
     ImGui::Render();
-    ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+
+    ImDrawData* commands = ImGui::GetDrawData();
+    if (!g_draw_reported) {
+        g_draw_reported = true;
+        const unsigned vertices = commands ? static_cast<unsigned>(commands->TotalVtxCount) : 0u;
+        const unsigned lists = commands ? static_cast<unsigned>(commands->CmdListsCount) : 0u;
+        wchar_t message[160];
+        const int written = std::swprintf(message, sizeof(message) / sizeof(message[0]),
+            L"renderer_hook: ImGui issued %u vertices in %u lists.\n", vertices, lists);
+        if (written > 0) OutputDebugStringW(message);
+    }
+    ImGui_ImplDX11_RenderDrawData(commands);
 
     context->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, previous_targets, previous_depth);
     if (previous_viewports) context->RSSetViewports(previous_viewports, &previous_viewport);
