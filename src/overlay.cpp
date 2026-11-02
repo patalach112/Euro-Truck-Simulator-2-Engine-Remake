@@ -20,30 +20,12 @@ unsigned g_failures = 0;
 bool g_skip_reported = false;
 bool g_draw_reported = false;
 constexpr unsigned max_start_attempts = 5;
+bool g_nav_seeded = false;
+bool g_was_interactive = false;
 
 constexpr ImGuiWindowFlags window_flags =
     ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
-    ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav;
-
-bool g_clip_saved = false;
-RECT g_saved_clip{};
-
-// The game confines the pointer to a rect while driving; that clip is what pins the cursor.
-// Restoring it on the way out hands control back exactly as it was before the overlay opened.
-void set_cursor_lock(bool engaged, HWND window) noexcept {
-    if (engaged && !g_clip_saved) {
-        RECT clip{};
-        if (GetClipCursor(&clip)) {
-            g_saved_clip = clip;
-            g_clip_saved = true;
-        }
-        ClipCursor(nullptr);
-        if (GetCapture() == window) ReleaseCapture();
-    } else if (!engaged && g_clip_saved) {
-        ClipCursor(&g_saved_clip);
-        g_clip_saved = false;
-    }
-}
+    ImGuiWindowFlags_NoSavedSettings;
 
 void stop() noexcept {
     if (g_running) {
@@ -68,7 +50,12 @@ bool start(ID3D11Device* device, ID3D11DeviceContext* context, HWND window) noex
     // No configuration file is written next to the game.
     io.IniFilename = nullptr;
     io.LogFilename = nullptr;
-    io.MouseDrawCursor = false;
+    // Navigation is keyboard-only: the engine owns the pointer and the WndProc layer
+    // never lets mouse messages through to the overlay.
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    io.ConfigNavEscapeClearFocusItem = true;
+    io.ConfigNavMoveSetMousePos = false;
+    io.BackendFlags &= ~ImGuiBackendFlags_HasMouseCursors;
     ImGui::StyleColorsDark();
     ImGui::GetStyle().WindowRounding = 4.0f;
     ImGui::GetStyle().WindowBorderSize = 1.0f;
@@ -96,10 +83,16 @@ bool start(ID3D11Device* device, ID3D11DeviceContext* context, HWND window) noex
     return true;
 }
 
-void draw_optimization() noexcept {
+void draw_optimization(bool interactive) noexcept {
     const optimization::report state = optimization::status();
     ImGui::Separator();
     bool disable = optimization::g_disable_remote_lights.load(std::memory_order_relaxed);
+    if (interactive && !g_nav_seeded) {
+        // A freshly focused window has no nav item; selecting the checkbox makes the first
+        // arrow or space press land on something visible.
+        ImGui::SetKeyboardFocusHere();
+        g_nav_seeded = true;
+    }
     if (ImGui::Checkbox("Optimize Crowd FPS (Disable Remote Lights/Beacons)", &disable)) {
         optimization::g_disable_remote_lights.store(disable, std::memory_order_relaxed);
     }
@@ -115,7 +108,11 @@ void draw(const stats& values, bool interactive) noexcept {
     ImGui::SetNextWindowSize(ImVec2(340.0f, 0.0f), ImGuiCond_Always);
     ImGui::SetNextWindowCollapsed(false, ImGuiCond_Always);
     ImGui::SetNextWindowBgAlpha(0.65f);
-    if (interactive) ImGui::SetNextWindowFocus();
+    if (interactive) {
+        // Outside interaction the window is inert and must not hold focus, otherwise its
+        // nav state would swallow arrow keys meant for the truck.
+        ImGui::SetNextWindowFocus();
+    }
     ImGuiWindowFlags flags = window_flags;
     if (!interactive) flags |= ImGuiWindowFlags_NoInputs;
     if (ImGui::Begin("ETS2 Engine Remake", nullptr, flags)) {
@@ -126,10 +123,9 @@ void draw(const stats& values, bool interactive) noexcept {
         ImGui::Text("Presents     %llu", values.presents);
         ImGui::Text("Swap effect  %s", values.present_mode);
         ImGui::Text("Back buffer  %u of %u", values.back_buffer, values.buffer_count);
-        draw_optimization();
-        if (!interactive) {
-            ImGui::TextDisabled("Insert: interact");
-        }
+        draw_optimization(interactive);
+        ImGui::TextDisabled(interactive ? "Arrows navigate, Space or Enter toggles, Insert closes"
+                                        : "Insert: keyboard navigation");
     }
     ImGui::End();
 }
@@ -178,10 +174,13 @@ bool render(ID3D11Device* device, ID3D11DeviceContext* context, ID3D11RenderTarg
     context->RSSetViewports(1, &viewport);
 
     const bool interactive = g_overlay_interactive.load(std::memory_order_relaxed);
-    set_cursor_lock(interactive, values.window);
+    if (interactive != g_was_interactive) {
+        g_was_interactive = interactive;
+        g_nav_seeded = false;
+        if (!interactive) ImGui::GetIO().ClearInputKeys();
+    }
 
     ImGuiIO& io = ImGui::GetIO();
-    io.MouseDrawCursor = interactive;
     ImGui_ImplWin32_NewFrame();
     // The back buffer is authoritative for the draw scale, whatever the window reports.
     io.DisplaySize = ImVec2(static_cast<float>(width), static_cast<float>(height));
@@ -190,6 +189,8 @@ bool render(ID3D11Device* device, ID3D11DeviceContext* context, ID3D11RenderTarg
     io.DeltaTime = delta > 0.0f && delta < 1.0f ? delta : 1.0f / 60.0f;
     ImGui_ImplDX11_NewFrame();
     ImGui::NewFrame();
+    // Dropping focus keeps nav state from consuming arrow keys while the overlay is passive.
+    if (!interactive) ImGui::SetWindowFocus(nullptr);
     draw(values, interactive);
     ImGui::Render();
 

@@ -197,19 +197,17 @@ unsigned current_buffer(IDXGISwapChain* chain, unsigned buffer_count) noexcept {
     return index < buffer_count ? index : 0;
 }
 
-bool is_overlay_window_message(UINT message) noexcept {
+// Keyboard messages belong to the menu while it is open; mouse messages are left to the
+// engine, which owns the pointer and the camera damping that goes with it.
+bool is_keyboard_message(UINT message) noexcept {
     switch (message) {
-    case WM_MOUSEMOVE:
-    case WM_LBUTTONDOWN:
-    case WM_LBUTTONUP:
-    case WM_LBUTTONDBLCLK:
-    case WM_RBUTTONDOWN:
-    case WM_RBUTTONUP:
-    case WM_RBUTTONDBLCLK:
-    case WM_MBUTTONDOWN:
-    case WM_MBUTTONUP:
-    case WM_MOUSEWHEEL:
-    case WM_MOUSEHWHEEL:
+    case WM_KEYDOWN:
+    case WM_KEYUP:
+    case WM_SYSKEYDOWN:
+    case WM_SYSKEYUP:
+    case WM_CHAR:
+    case WM_SYSCHAR:
+    case WM_DEADCHAR:
         return true;
     default:
         return false;
@@ -228,11 +226,10 @@ LRESULT CALLBACK hkWndProc(HWND window, UINT message, WPARAM wparam, LPARAM lpar
         return 0;
     }
 
-    if (overlay::g_overlay_interactive.load(std::memory_order_relaxed) && overlay::ready()) {
-        // The platform backend converts the raw message before the engine sees the coordinates,
-        // so the pointer keeps moving even while the game tries to recentre it.
+    if (overlay::g_overlay_interactive.load(std::memory_order_relaxed) && overlay::ready() &&
+        is_keyboard_message(message)) {
         ImGui_ImplWin32_WndProcHandler(window, message, wparam, lparam);
-        if (is_overlay_window_message(message)) return 0;
+        return 0;
     }
 
     if (g_original_wndproc) return CallWindowProcW(g_original_wndproc, window, message, wparam, lparam);
