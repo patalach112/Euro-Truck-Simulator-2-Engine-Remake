@@ -1,4 +1,5 @@
 #include "dx_hook.h"
+#include "allocator.h"
 #include "overlay.h"
 #include "imgui.h"
 #include "imgui_impl_win32.h"
@@ -301,6 +302,9 @@ HRESULT WINAPI hkPresent(IDXGISwapChain* chain, UINT interval, UINT flags) noexc
     // Unconditional: every present is a frame in which the overlay is redrawn.
     sample_frame();
     draw_overlay(chain);
+    // The frame is complete at this point, so the bank that has been idle since the previous
+    // frame can be handed back to the allocator.
+    allocator::end_frame();
     return g_present ? g_present(chain, interval, flags) : E_FAIL;
 }
 
@@ -308,6 +312,7 @@ HRESULT WINAPI hkPresent1(IDXGISwapChain1* chain, UINT interval, UINT flags,
                           const DXGI_PRESENT_PARAMETERS* parameters) noexcept {
     sample_frame();
     draw_overlay(chain);
+    allocator::end_frame();
     return g_present1 ? g_present1(chain, interval, flags, parameters) : E_FAIL;
 }
 

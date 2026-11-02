@@ -39,8 +39,12 @@ void log(const wchar_t* text) noexcept {
 
 std::uintptr_t WINAPI hkAllocate(std::uintptr_t size, std::uintptr_t second,
                                  std::uintptr_t third, std::uintptr_t fourth) noexcept {
-    if (g_redirect.load(std::memory_order_relaxed) && size && size <= direct_limit) {
-        if (void* block = allocator::allocate(static_cast<std::size_t>(size))) {
+    // Only transient scratch is served from the arena; anything requested before the first
+    // frame rotation is treated as startup asset data and left on the engine heap.
+    if (g_redirect.load(std::memory_order_relaxed) && size && size <= direct_limit &&
+        allocator::accepting()) {
+        if (void* block = allocator::allocate(static_cast<std::size_t>(size), 16,
+                                              allocator::lifetime::frame)) {
             g_served.fetch_add(1, std::memory_order_relaxed);
             return reinterpret_cast<std::uintptr_t>(block);
         }

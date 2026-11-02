@@ -125,7 +125,12 @@ void draw_optimization(bool interactive) noexcept {
     ImGui::Text("Arena peak   %.1f MB, %llu blocks live",
         static_cast<double>(arena.peak) / (1024.0 * 1024.0),
         static_cast<unsigned long long>(arena.live));
+    ImGui::Text("Frame bank   %u, %llu frames recycled", arena.bank, arena.frames);
     ImGui::Text("Served       %llu (%llu rejected)", memory.served, memory.rejected);
+    if (!arena.recycling) {
+        ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.35f, 1.0f), "%llu blocks escaped their frame",
+            static_cast<unsigned long long>(arena.escaped));
+    }
     if (interactive) {
         bool redirect = memory.redirecting;
         if (ImGui::Checkbox("Redirect asset allocations to arena", &redirect)) {
