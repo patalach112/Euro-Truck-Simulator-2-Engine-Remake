@@ -1,6 +1,8 @@
 #include "core.h"
 #include "dx_hook.h"
+#include "engine_core.h"
 #include "optimization.h"
+#include "pool_info.h"
 #include "profiler.h"
 #include "scanner.h"
 
@@ -42,6 +44,7 @@ DWORD WINAPI scan_thread(void*) noexcept {
         scan.timed_out ? L" within the time budget" : L"");
     if (written > 0) OutputDebugStringW(message);
     optimization::install();
+    engine_core::install(thread_pool::shared());
     return 0;
 }
 

@@ -43,6 +43,8 @@ add_library(renderer_hook SHARED
     src/dx_hook.cpp src/dx_hook.h
     src/overlay.cpp src/overlay.h
     src/optimization.cpp src/optimization.h
+    src/engine_core.cpp src/engine_core.h
+    src/thread_pool.cpp src/thread_pool.h src/pool_info.h
     src/d3dcompiler_shim.cpp
     src/renderer_hook.def)
 set_target_properties(renderer_hook PROPERTIES PREFIX "")
@@ -53,6 +55,8 @@ add_executable(Injector src/injector.cpp)
 target_compile_features(renderer_hook PRIVATE cxx_std_17)
 target_compile_features(Injector PRIVATE cxx_std_17)
 target_compile_features(imgui PRIVATE cxx_std_17)
+find_package(Threads REQUIRED)
+target_link_libraries(renderer_hook PRIVATE Threads::Threads)
 if(MSVC)
     target_compile_options(renderer_hook PRIVATE /W4 /permissive-)
     target_compile_options(Injector PRIVATE /W4 /permissive-)

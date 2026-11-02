@@ -2,6 +2,7 @@
 #include "imgui.h"
 #include "imgui_impl_dx11.h"
 #include "imgui_impl_win32.h"
+#include "engine_core.h"
 #include "optimization.h"
 
 #include <atomic>
@@ -101,6 +102,16 @@ void draw_optimization(bool interactive) noexcept {
     }
     ImGui::Text("Light calls  %llu", state.calls);
     ImGui::Text("Skipped      %llu", state.skipped);
+
+    const engine_core::report engine = engine_core::status();
+    ImGui::Separator();
+    ImGui::Text("Workers      %u", engine.workers);
+    ImGui::Text("Dispatches   %llu", engine.dispatches);
+    ImGui::Text("Updates      %llu", engine.updates);
+    ImGui::Text("Items        %llu", engine.items);
+    if (!engine.adapted) {
+        ImGui::TextDisabled("no entity adapter: loop runs sequentially");
+    }
 }
 
 void draw(const stats& values, bool interactive) noexcept {
