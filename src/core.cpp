@@ -1,6 +1,7 @@
 #include "core.h"
 #include "dx_hook.h"
 #include "engine_core.h"
+#include "memory_hook.h"
 #include "optimization.h"
 #include "pool_info.h"
 #include "profiler.h"
@@ -45,6 +46,7 @@ DWORD WINAPI scan_thread(void*) noexcept {
     if (written > 0) OutputDebugStringW(message);
     optimization::install();
     engine_core::install(thread_pool::shared());
+    memory_hook::install(256u * 1024u * 1024u);
     return 0;
 }
 

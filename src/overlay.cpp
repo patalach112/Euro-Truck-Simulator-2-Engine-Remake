@@ -2,7 +2,9 @@
 #include "imgui.h"
 #include "imgui_impl_dx11.h"
 #include "imgui_impl_win32.h"
+#include "allocator.h"
 #include "engine_core.h"
+#include "memory_hook.h"
 #include "optimization.h"
 
 #include <atomic>
@@ -111,6 +113,25 @@ void draw_optimization(bool interactive) noexcept {
     ImGui::Text("Items        %llu", engine.items);
     if (!engine.adapted) {
         ImGui::TextDisabled("no entity adapter: loop runs sequentially");
+    }
+
+    const memory_hook::report memory = memory_hook::status();
+    const allocator::stats arena = allocator::snapshot();
+    ImGui::Separator();
+    ImGui::TextColored(ImVec4(0.35f, 1.0f, 0.45f, 1.0f), "Allocator Type: Remake Linear Core Active");
+    ImGui::Text("Arena        %.1f MB used / %.1f MB free",
+        static_cast<double>(arena.used) / (1024.0 * 1024.0),
+        static_cast<double>(arena.capacity - arena.used) / (1024.0 * 1024.0));
+    ImGui::Text("Arena peak   %.1f MB, %llu blocks live",
+        static_cast<double>(arena.peak) / (1024.0 * 1024.0),
+        static_cast<unsigned long long>(arena.live));
+    ImGui::Text("Served       %llu (%llu rejected)", memory.served, memory.rejected);
+    if (interactive) {
+        bool redirect = memory.redirecting;
+        if (ImGui::Checkbox("Redirect asset allocations to arena", &redirect)) {
+            memory_hook::set_redirect_enabled(redirect);
+        }
+        if (!memory.hooked) ImGui::TextDisabled("allocation pair not hooked in this build");
     }
 }
 

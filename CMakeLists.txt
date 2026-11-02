@@ -44,6 +44,8 @@ add_library(renderer_hook SHARED
     src/overlay.cpp src/overlay.h
     src/optimization.cpp src/optimization.h
     src/engine_core.cpp src/engine_core.h
+    src/allocator.cpp src/allocator.h
+    src/memory_hook.cpp src/memory_hook.h
     src/thread_pool.cpp src/thread_pool.h src/pool_info.h
     src/d3dcompiler_shim.cpp
     src/renderer_hook.def)
