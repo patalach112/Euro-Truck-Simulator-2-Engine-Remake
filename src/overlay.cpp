@@ -15,6 +15,7 @@ bool g_running = false;
 unsigned g_failures = 0;
 bool g_skip_reported = false;
 bool g_draw_reported = false;
+constexpr unsigned max_start_attempts = 5;
 
 constexpr ImGuiWindowFlags window_flags =
     ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_AlwaysAutoResize |
@@ -109,10 +110,15 @@ bool render(ID3D11Device* device, ID3D11DeviceContext* context, ID3D11RenderTarg
     }
     if (g_device != device) {
         stop();
-        // A partial failure is retried on the next frame instead of silencing the overlay for good.
+        // Retried a bounded number of times: re-creating the backend every present would
+        // rebuild the font atlas and shaders at frame rate.
+        if (g_failures >= max_start_attempts) return false;
         if (!start(device, context)) {
-            if (++g_failures <= 3) {
+            if (++g_failures == 1) {
                 OutputDebugStringW(L"renderer_hook: ImGui Direct3D 11 backend failed to start.\n");
+            }
+            if (g_failures == max_start_attempts) {
+                OutputDebugStringW(L"renderer_hook: overlay disabled after repeated backend failures.\n");
             }
             return false;
         }

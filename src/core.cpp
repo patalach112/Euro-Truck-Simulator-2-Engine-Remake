@@ -31,6 +31,20 @@ void pin(HMODULE module) noexcept {
     }
 }
 
+// Runs once at the lowest priority and exits; nothing here touches the present path.
+DWORD WINAPI scan_thread(void*) noexcept {
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_LOWEST);
+    const scanner::result scan = scanner::find_main_code("E8 ? ? ? ? 48 8B D8");
+    wchar_t message[192];
+    const int written = std::swprintf(message, sizeof(message) / sizeof(message[0]),
+        L"renderer_hook: example code signature %ls (%p)%ls.\n",
+        scan.address ? L"found" : L"not found", static_cast<const void*>(scan.address),
+        scan.timed_out ? L" within the time budget" : L"");
+    if (written > 0) OutputDebugStringW(message);
+    optimization::install();
+    return 0;
+}
+
 }  // namespace
 
 void start(HMODULE module) noexcept {
@@ -42,18 +56,17 @@ void start(HMODULE module) noexcept {
         return;
     }
 
-    const auto match = scanner::find_main_code("E8 ? ? ? ? 48 8B D8");
-    wchar_t message[192];
-    int written = std::swprintf(message, sizeof(message) / sizeof(message[0]),
-        L"renderer_hook: example code signature %ls (%p); no engine markers configured.\n",
-        match ? L"found" : L"not found", static_cast<const void*>(match));
-    if (written > 0) OutputDebugStringW(message);
-
-    optimization::install();
     if (!dx_hook::install()) {
         OutputDebugStringW(L"renderer_hook: continuing without the render overlay.\n");
     }
     profiler::start();
+
+    HANDLE scan = CreateThread(nullptr, 0, scan_thread, nullptr, 0, nullptr);
+    if (!scan) {
+        OutputDebugStringW(L"renderer_hook: scan thread could not be created.\n");
+        return;
+    }
+    CloseHandle(scan);
 }
 
 }  // namespace core

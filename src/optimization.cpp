@@ -53,12 +53,16 @@ void set_remote_predicate(remote_predicate predicate) noexcept {
 }
 
 bool install() noexcept {
-    const auto* match = scanner::find_main_code(light_signature);
-    g_located.store(match != nullptr, std::memory_order_relaxed);
-    if (!match) {
-        log(L"renderer_hook: vehicle light signature not found in this build; optimization idle.\n");
+    const scanner::result scan = scanner::find_main_code(light_signature);
+    g_located.store(scan.address != nullptr, std::memory_order_relaxed);
+    if (!scan.address) {
+        log(scan.timed_out
+            ? L"renderer_hook: vehicle light scan hit its time budget; optimization idle.\n"
+            : L"renderer_hook: vehicle light signature not found in this build; optimization idle.\n");
         return false;
     }
+    if (g_hooked.load(std::memory_order_relaxed)) return true;
+    const auto* match = scan.address;
 
     const MH_STATUS initialized = MH_Initialize();
     if (initialized != MH_OK && initialized != MH_ERROR_ALREADY_INITIALIZED) {

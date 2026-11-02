@@ -10,6 +10,7 @@ namespace profiler {
 namespace {
 
 DWORD WINAPI tick(void*) noexcept {
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
     LARGE_INTEGER frequency{};
     LARGE_INTEGER now{};
     if (!QueryPerformanceFrequency(&frequency) || frequency.QuadPart < 60 || !QueryPerformanceCounter(&now)) {
