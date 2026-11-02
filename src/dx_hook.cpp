@@ -1,5 +1,6 @@
 #include "dx_hook.h"
 #include "hook.h"
+#include "overlay.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -25,7 +26,11 @@ hook::InlineHook g_hook;
 std::atomic<PresentFn> g_original{nullptr};
 std::atomic<unsigned long long> g_frames{0};
 LARGE_INTEGER g_frequency{};
-thread_local LARGE_INTEGER t_previous_frame{};
+thread_local struct {
+    LARGE_INTEGER tick{};
+    double fps = 0.0;
+    double frame_ms = 0.0;
+} t_frame;
 
 using ReleaseFn = ULONG(STDMETHODCALLTYPE*)(IUnknown*);
 
@@ -173,12 +178,16 @@ void sample_frame() noexcept {
     LARGE_INTEGER now{};
     if (!QueryPerformanceCounter(&now)) return;
     const auto frame = g_frames.fetch_add(1, std::memory_order_relaxed) + 1;
-    const auto previous = t_previous_frame.QuadPart;
-    t_previous_frame = now;
+    const auto previous = t_frame.tick.QuadPart;
+    t_frame.tick = now;
     if (previous == 0 || g_frequency.QuadPart <= 0) return;
 
     const auto delta = static_cast<std::uint64_t>(now.QuadPart - previous);
     const auto nanoseconds = delta * 1000000000ull / static_cast<std::uint64_t>(g_frequency.QuadPart);
+    const double milliseconds = static_cast<double>(nanoseconds) / 1000000.0;
+    const double instantaneous = milliseconds > 0.0 ? 1000.0 / milliseconds : 0.0;
+    t_frame.fps = t_frame.fps > 0.0 ? t_frame.fps * 0.9 + instantaneous * 0.1 : instantaneous;
+    t_frame.frame_ms = milliseconds;
     if (nanoseconds <= spike_threshold_ns) return;
 
     wchar_t message[192];
@@ -192,6 +201,7 @@ HRESULT WINAPI hkPresent(IDXGISwapChain* swap_chain, UINT interval, UINT flags) 
     const PresentFn original = g_original.load(std::memory_order_acquire);
     if (!original) return E_FAIL;
     sample_frame();
+    overlay::render(swap_chain, t_frame.fps, t_frame.frame_ms);
     return original(swap_chain, interval, flags);
 }
 

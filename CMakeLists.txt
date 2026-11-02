@@ -20,7 +20,8 @@ add_library(renderer_hook SHARED
     src/renderer_hook.cpp src/renderer_hook.h
     src/scanner.cpp src/scanner.h
     src/hook.cpp src/hook.h
-    src/dx_hook.cpp src/dx_hook.h)
+    src/dx_hook.cpp src/dx_hook.h
+    src/overlay.cpp src/overlay.h)
 set_target_properties(renderer_hook PROPERTIES PREFIX "")
 target_link_libraries(renderer_hook PRIVATE d3d11 dxgi)
 add_executable(Injector src/injector.cpp)
