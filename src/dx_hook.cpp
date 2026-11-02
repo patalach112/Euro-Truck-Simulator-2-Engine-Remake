@@ -26,6 +26,34 @@ hook::InlineHook g_hook;
 std::atomic<PresentFn> g_original{nullptr};
 std::atomic<unsigned long long> g_frames{0};
 LARGE_INTEGER g_frequency{};
+bool g_mode_reported = false;
+
+const wchar_t* swap_effect_name(DXGI_SWAP_EFFECT effect) noexcept {
+    switch (effect) {
+    case DXGI_SWAP_EFFECT_DISCARD: return L"discard";
+    case DXGI_SWAP_EFFECT_SEQUENTIAL: return L"sequential";
+    case DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL: return L"flip sequential";
+    case DXGI_SWAP_EFFECT_FLIP_DISCARD: return L"flip discard";
+    default: return L"unknown";
+    }
+}
+
+void report_presentation(IDXGISwapChain* swap_chain) noexcept {
+    if (g_mode_reported) return;
+    using get_desc_fn = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain*, DXGI_SWAP_CHAIN_DESC*);
+    auto** table = *reinterpret_cast<void***>(swap_chain);
+    const auto get_desc = table ? reinterpret_cast<get_desc_fn>(table[12]) : nullptr;
+    if (!get_desc) return;
+    DXGI_SWAP_CHAIN_DESC description{};
+    if (FAILED(get_desc(swap_chain, &description))) return;
+    g_mode_reported = true;
+    wchar_t message[160];
+    const int written = std::swprintf(message, sizeof(message) / sizeof(message[0]),
+        L"renderer_hook: presentation mode %ls, %u buffers.\n",
+        swap_effect_name(description.SwapEffect), description.BufferCount);
+    if (written > 0) OutputDebugStringW(message);
+}
+
 thread_local struct {
     LARGE_INTEGER tick{};
     double fps = 0.0;
@@ -201,6 +229,8 @@ HRESULT WINAPI hkPresent(IDXGISwapChain* swap_chain, UINT interval, UINT flags) 
     const PresentFn original = g_original.load(std::memory_order_acquire);
     if (!original) return E_FAIL;
     sample_frame();
+    report_presentation(swap_chain);
+    // The overlay draw is the last submission on the immediate context before Present.
     overlay::render(swap_chain, t_frame.fps, t_frame.frame_ms);
     return original(swap_chain, interval, flags);
 }
